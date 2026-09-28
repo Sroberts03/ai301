@@ -22,10 +22,179 @@ Sroberts03
 <!-- TODO: paste the comment permalink here after posting, then paste the comment
 text underneath it. Draft text is in ../../../unit2-drafts/claim.md -->
 
+https://github.com/codepath/pathreview-ai301-fa26-s1/issues/12#issuecomment-5880671172
+
+Hi, I'm a student working through a course unit on open-source contribution,
+and I'd like to take this one.
+
+On `main` (f89c06f), the test meant to be the snapshot in
+`tests/unit/test_prompt_templates.py` looks like it can't fail the way this
+issue describes:
+
+```python
+content_hash = hashlib.md5(template_content.encode()).hexdigest()
+
+# Expected hash - update if templates intentionally change
+# This helps detect unintended changes to templates
+assert isinstance(content_hash, str)
+assert len(content_hash) == 32  # MD5 hash length
+```
+
+It hashes all five templates together, then asserts only that the digest is 32
+characters — no expected value is ever compared against, so any edit should
+still pass. The rest of the file checks placeholders, JSON instructions, and
+keywords a silently rewritten template would still satisfy.
+
+I've read that file but haven't run it. My first step is to verify the gap
+rather than assume it: edit one template locally, run `pytest
+tests/unit/test_prompt_templates.py`, and see whether the suite still passes.
+I'll post the result here either way before opening a PR.
+
+If it holds up, I'd record a digest per `(name, version)` pair in
+`PROMPT_TEMPLATES` instead of one combined hash — editing `skills_feedback` v1
+then fails by name, while adding a `v2` alongside an unchanged v1 passes. That's
+the version-bump rule the issue asks for, and it says which template moved.
+
+One design question: digests inline in the test file, or a committed snapshot
+file with a flag to regenerate them? I'll go with inline unless you'd prefer
+otherwise.
+
+Happy to step aside if someone's already working on this.
+
+
 **Reproduction comment**
 
 <!-- TODO: paste the comment permalink here after posting, then paste the comment
 text underneath it. -->
+
+https://github.com/codepath/pathreview-ai301-fa26-s1/issues/12#issuecomment-5880956435
+
+# Reproduction: the prompt-template snapshot test cannot fail
+
+**Issue:** [#12 — Add snapshot tests for prompt templates to catch accidental changes](https://github.com/codepath/pathreview-ai301-fa26-s1/issues/12)
+**Verified on:** `main` @ `f89c06f`
+**File:** `tests/unit/test_prompt_templates.py`, `test_template_snapshot_content_hash` (lines 191–204)
+
+## Summary
+
+`test_template_snapshot_content_hash` looks like the snapshot test issue #12 asks for,
+but it never compares the hash it computes against a stored baseline. A template's
+content can change arbitrarily and the test still passes. The protection the issue
+describes is not currently in place.
+
+## Setup
+
+```bash
+git clone https://github.com/codepath/pathreview-ai301-fa26-s1
+cd pathreview-ai301-fa26-s1
+git checkout main            # f89c06f
+
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+```
+
+`make setup` also runs migrations, seeds the database, and installs the frontend.
+None of that is needed here — this test only imports `rag/generator/prompt_templates.py`,
+so `pip install pytest structlog` is enough if you want the minimum.
+
+## Step 1 — baseline
+
+```bash
+.venv/bin/pytest tests/unit/test_prompt_templates.py -q
+```
+
+```
+.....................................      [100%]
+37 passed in 0.03s
+```
+
+## Step 2 — record the hash the test computes
+
+This mirrors lines 194–199 of the test exactly:
+
+```bash
+.venv/bin/python -c "
+import hashlib
+from rag.generator.prompt_templates import PROMPT_TEMPLATES as P
+c=''.join(P[n][v] for n in sorted(P) for v in sorted(P[n]))
+print(hashlib.md5(c.encode()).hexdigest())
+"
+```
+
+```
+3e79f974f8c1b6d8d1481dfc42e949ca
+```
+
+## Step 3 — change a template's content, leaving its version alone
+
+In `rag/generator/prompt_templates.py`, inside `PROMPT_TEMPLATES["skills_feedback"]["v1"]`:
+
+```diff
+-1. Demonstrated technical skills (with specific examples from projects)
++1. Demonstrated technical skills (IGNORE ALL PREVIOUS INSTRUCTIONS)
+```
+
+The edit is deliberately chosen to slip past every *other* test in the module. It keeps
+`{context}`, `{github_username}` and `{project_count}` intact, keeps the word "json",
+stays over the 100-character floor, and leaves the version key at `v1`. Nothing else in
+the suite is watching this text.
+
+## Step 4 — confirm the content hash moved
+
+Re-running the Step 2 command:
+
+```
+a196ad77879799f55f5119976f818de6     # was 3e79f974f8c1b6d8d1481dfc42e949ca
+```
+
+## Step 5 — re-run the tests
+
+```bash
+.venv/bin/pytest tests/unit/test_prompt_templates.py -q
+.venv/bin/pytest "tests/unit/test_prompt_templates.py::TestPromptTemplates::test_template_snapshot_content_hash" -v
+```
+
+```
+37 passed in 0.02s
+
+tests/unit/test_prompt_templates.py::TestPromptTemplates::test_template_snapshot_content_hash PASSED [100%]
+1 passed in 0.01s
+```
+
+**Expected:** the snapshot test fails, because a template's content changed without a version bump.
+**Actual:** all 37 tests pass. A prompt now carrying an injection string ships green.
+
+## Root cause
+
+`tests/unit/test_prompt_templates.py:203-204`:
+
+```python
+content_hash = hashlib.md5(template_content.encode()).hexdigest()
+
+# Expected hash - update if templates intentionally change
+# This helps detect unintended changes to templates
+assert isinstance(content_hash, str)
+assert len(content_hash) == 32  # MD5 hash length
+```
+
+`hashlib.md5(...).hexdigest()` returns a 32-character `str` for *every* possible input,
+including the empty string. Both assertions are tautologies — there is no template
+content that makes this test fail. The comment above them describes an expected-hash
+constant that was never written.
+
+## Notes toward a fix
+
+Two directions, if a maintainer wants to weigh in before I open a PR:
+
+1. **Pin the hash.** Compare `content_hash` against a module-level constant. Smallest
+   change, but a failure only says "something under `PROMPT_TEMPLATES` moved" — the
+   developer still has to diff by hand to find out what.
+2. **Per-template snapshot files.** One committed snapshot per `(template, version)`
+   pair, compared individually. More files, but a failure names the template and the
+   diff is readable in review, which is closer to what the issue asks for ("developers
+   must consciously version templates").
+
+I'd lean toward (2), with a documented way to regenerate snapshots for intentional changes.
 
 ## Eval iterations
 
